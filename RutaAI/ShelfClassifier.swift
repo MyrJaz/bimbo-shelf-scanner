@@ -2,6 +2,7 @@ import Vision
 import CoreML
 import SwiftUI
 import UIKit
+import os.log
 
 // MARK: - Tipos de resultado
 
@@ -23,20 +24,48 @@ struct ShelfResult {
 
 class ShelfClassifier {
 
-    // Usa la clase auto-generada por Xcode. Fuerza CPU para funcionar en simulador
-    // (el simulador no tiene Neural Engine — "espresso context" falla con GPU/ANE).
-    private func cargarModelo() -> VNCoreMLModel? {
+    private let log = Logger(subsystem: "com.rutaai.shelf", category: "ShelfClassifier")
+
+    // MARK: - Carga del modelo
+
+    /// Intenta cargar el modelo de varias maneras y reporta exactamente qué falla.
+    private func cargarModelo() -> (VNCoreMLModel?, String) {
+        // Paso 1: ¿está el .mlmodelc en el bundle?
+        let bundleURL = Bundle.main.url(forResource: "BimboShelfClassifier", withExtension: "mlmodelc")
+        log.debug("URL .mlmodelc en bundle: \(String(describing: bundleURL))")
+
+        // Paso 2: configurar para CPU (simulador no tiene Neural Engine)
+        let config = MLModelConfiguration()
+        config.computeUnits = .cpuOnly
+
+        // Paso 3: usar la clase auto-generada
         do {
-            let config = MLModelConfiguration()
-            config.computeUnits = .cpuOnly
-            let model = try BimboShelfClassifier(configuration: config)
-            return try VNCoreMLModel(for: model.model)
+            let generated = try BimboShelfClassifier(configuration: config)
+            let vn = try VNCoreMLModel(for: generated.model)
+            log.debug("Modelo cargado vía clase auto-generada ✓")
+            return (vn, "ok")
         } catch {
-            return nil
+            log.error("Falló clase auto-generada: \(error.localizedDescription)")
         }
+
+        // Paso 4: fallback — cargar directo desde la URL del bundle
+        if let url = bundleURL {
+            do {
+                let mlModel = try MLModel(contentsOf: url, configuration: config)
+                let vn = try VNCoreMLModel(for: mlModel)
+                log.debug("Modelo cargado vía Bundle URL ✓")
+                return (vn, "ok")
+            } catch {
+                log.error("Falló carga desde URL: \(error.localizedDescription)")
+                return (nil, "Error cargando modelo: \(error.localizedDescription)")
+            }
+        }
+
+        return (nil, "BimboShelfClassifier no está en el bundle")
     }
 
-    // Determina cuántos huecos estimar según clase y nivel de confianza
+    // MARK: - Reglas de negocio
+
     private func calcularHuecos(clase: String, confidence: Double) -> Int {
         switch clase {
         case "lleno":
@@ -45,20 +74,19 @@ class ShelfClassifier {
             switch confidence {
             case 0.5..<0.7:  return 3
             case 0.7..<0.85: return 5
-            default:         return 6  // 0.85 – 1.0
+            default:         return 6
             }
         case "varios_huecos":
             switch confidence {
             case 0.5..<0.7:  return 7
             case 0.7..<0.85: return 10
-            default:         return 14 // 0.85 – 1.0
+            default:         return 14
             }
         default:
             return 0
         }
     }
 
-    // Mensaje de voz en español mexicano natural según estado y huecos
     private func mensajeParaHuecos(clase: String, huecos: Int) -> String {
         switch clase {
         case "lleno":
@@ -80,7 +108,6 @@ class ShelfClassifier {
         }
     }
 
-    // Mapea la clase string al enum y su color de semáforo
     private func mapearEstado(clase: String) -> (EstadoAnaquel, Color) {
         switch clase {
         case "lleno":         return (.lleno,        .green)
@@ -90,33 +117,69 @@ class ShelfClassifier {
         }
     }
 
-    // Resultado de fallback cuando el modelo .mlmodel no está en el bundle
-    private func resultadoMock() -> ShelfResult {
+    /// Mock con razón específica para que la UI muestre qué falló.
+    private func resultadoMock(razon: String) -> ShelfResult {
         ShelfResult(
             estado: .variosHuecos,
             confidence: 0.0,
-            huecosEstimados: 5,
-            mensajeVoz: "Modo demo - modelo no encontrado",
-            colorSemaforo: .orange
+            huecosEstimados: 0,
+            mensajeVoz: "Diagnóstico: \(razon)",
+            colorSemaforo: .gray
         )
+    }
+
+    // MARK: - Caja para evitar doble-resume
+
+    private final class Box: @unchecked Sendable {
+        var resumed = false
+        let continuation: CheckedContinuation<ShelfResult, Never>
+        init(_ c: CheckedContinuation<ShelfResult, Never>) { continuation = c }
+        func resume(_ result: ShelfResult) {
+            guard !resumed else { return }
+            resumed = true
+            continuation.resume(returning: result)
+        }
     }
 
     // MARK: - Clasificación principal
 
-    /// Analiza una imagen y regresa el estado del anaquel.
-    /// Task.detached evita el warning "unsafeForcedSync" al correr CoreML
-    /// fuera del cooperative thread pool de Swift Concurrency.
     func classify(image: UIImage) async -> ShelfResult {
-        guard let cgImage = image.cgImage else { return resultadoMock() }
+        log.debug("classify() llamado")
 
-        return await Task.detached(priority: .userInitiated) { [self] in
-            guard let vnModel = self.cargarModelo() else { return self.resultadoMock() }
+        guard let cgImage = image.cgImage else {
+            log.error("UIImage sin cgImage")
+            return resultadoMock(razon: "Imagen sin cgImage")
+        }
 
-            var resultado = self.resultadoMock()
+        let (modeloOpt, razon) = cargarModelo()
+        guard let vnModel = modeloOpt else {
+            return resultadoMock(razon: razon)
+        }
 
-            let request = VNCoreMLRequest(model: vnModel) { req, _ in
-                guard let observations = req.results as? [VNClassificationObservation],
-                      let top = observations.first else { return }
+        return await withCheckedContinuation { continuation in
+            let box = Box(continuation)
+
+            let request = VNCoreMLRequest(model: vnModel) { req, error in
+                if let error = error {
+                    self.log.error("VNCoreMLRequest error: \(error.localizedDescription)")
+                    box.resume(self.resultadoMock(razon: "Vision: \(error.localizedDescription)"))
+                    return
+                }
+                guard let observations = req.results as? [VNClassificationObservation] else {
+                    self.log.error("Resultados no son VNClassificationObservation")
+                    box.resume(self.resultadoMock(razon: "Resultados con tipo inesperado"))
+                    return
+                }
+                guard let top = observations.first else {
+                    self.log.error("Sin observaciones")
+                    box.resume(self.resultadoMock(razon: "Sin observaciones"))
+                    return
+                }
+
+                self.log.debug("Top: \(top.identifier) confidence=\(top.confidence)")
+                for obs in observations {
+                    self.log.debug("  - \(obs.identifier): \(obs.confidence)")
+                }
 
                 let clase      = top.identifier
                 let confidence = Double(top.confidence)
@@ -124,19 +187,27 @@ class ShelfClassifier {
                 let mensaje    = self.mensajeParaHuecos(clase: clase, huecos: huecos)
                 let (estado, color) = self.mapearEstado(clase: clase)
 
-                resultado = ShelfResult(
+                box.resume(ShelfResult(
                     estado: estado,
                     confidence: confidence,
                     huecosEstimados: huecos,
                     mensajeVoz: mensaje,
                     colorSemaforo: color
-                )
+                ))
             }
-
             request.imageCropAndScaleOption = .centerCrop
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            try? handler.perform([request])
-            return resultado
-        }.value
+
+            // CoreML síncrono fuera del cooperative thread pool de Swift Concurrency
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+                    try handler.perform([request])
+                    // Si perform regresó sin throw, el completion ya se llamó
+                } catch {
+                    self.log.error("handler.perform throw: \(error.localizedDescription)")
+                    box.resume(self.resultadoMock(razon: "Handler: \(error.localizedDescription)"))
+                }
+            }
+        }
     }
 }
