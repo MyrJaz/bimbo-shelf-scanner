@@ -131,16 +131,25 @@ private struct ResultadoCard: View {
             Text(textoEstado)
                 .font(.system(size: 22, weight: .bold))
 
-            Text("Se estiman \(resultado.huecosEstimados) huecos")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            // Si la certeza es 0, estamos en modo diagnóstico — mostrar la razón
+            if resultado.confidence < 0.001 {
+                Text(resultado.mensajeVoz)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 8)
+            } else {
+                Text("Se estiman \(resultado.huecosEstimados) huecos")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
-            Text(String(format: "Certeza del modelo: %.0f%%", resultado.confidence * 100))
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+                Text(String(format: "Certeza del modelo: %.0f%%", resultado.confidence * 100))
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
 
-            ProgressView(value: resultado.confidence)
-                .tint(resultado.colorSemaforo)
+                ProgressView(value: resultado.confidence)
+                    .tint(resultado.colorSemaforo)
+            }
 
             Button {
                 onReproducir()

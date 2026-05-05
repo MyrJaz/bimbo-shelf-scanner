@@ -26,50 +26,24 @@ class ShelfClassifier {
 
     private let log = Logger(subsystem: "com.rutaai.shelf", category: "ShelfClassifier")
 
-    // MARK: - Carga del modelo
+    // MARK: - Carga del modelo (probando varios computeUnits)
 
-    /// Intenta cargar el modelo de varias maneras y reporta exactamente qué falla.
-    private func cargarModelo() -> (VNCoreMLModel?, String) {
-        // Paso 1: ¿está el .mlmodelc en el bundle?
-        let bundleURL = Bundle.main.url(forResource: "BimboShelfClassifier", withExtension: "mlmodelc")
-        log.debug("URL .mlmodelc en bundle: \(String(describing: bundleURL))")
-
-        // Paso 2: configurar para CPU (simulador no tiene Neural Engine)
-        let config = MLModelConfiguration()
-        config.computeUnits = .cpuOnly
-
-        // Paso 3: usar la clase auto-generada
+    private func cargarModelo(units: MLComputeUnits) -> BimboShelfClassifier? {
         do {
-            let generated = try BimboShelfClassifier(configuration: config)
-            let vn = try VNCoreMLModel(for: generated.model)
-            log.debug("Modelo cargado vía clase auto-generada ✓")
-            return (vn, "ok")
+            let config = MLModelConfiguration()
+            config.computeUnits = units
+            return try BimboShelfClassifier(configuration: config)
         } catch {
-            log.error("Falló clase auto-generada: \(error.localizedDescription)")
+            log.warning("Load \(String(describing: units)) falló: \(error.localizedDescription)")
+            return nil
         }
-
-        // Paso 4: fallback — cargar directo desde la URL del bundle
-        if let url = bundleURL {
-            do {
-                let mlModel = try MLModel(contentsOf: url, configuration: config)
-                let vn = try VNCoreMLModel(for: mlModel)
-                log.debug("Modelo cargado vía Bundle URL ✓")
-                return (vn, "ok")
-            } catch {
-                log.error("Falló carga desde URL: \(error.localizedDescription)")
-                return (nil, "Error cargando modelo: \(error.localizedDescription)")
-            }
-        }
-
-        return (nil, "BimboShelfClassifier no está en el bundle")
     }
 
     // MARK: - Reglas de negocio
 
     private func calcularHuecos(clase: String, confidence: Double) -> Int {
         switch clase {
-        case "lleno":
-            return 0
+        case "lleno":         return 0
         case "pocos_huecos":
             switch confidence {
             case 0.5..<0.7:  return 3
@@ -82,8 +56,7 @@ class ShelfClassifier {
             case 0.7..<0.85: return 10
             default:         return 14
             }
-        default:
-            return 0
+        default: return 0
         }
     }
 
@@ -117,97 +90,171 @@ class ShelfClassifier {
         }
     }
 
-    /// Mock con razón específica para que la UI muestre qué falló.
     private func resultadoMock(razon: String) -> ShelfResult {
         ShelfResult(
             estado: .variosHuecos,
             confidence: 0.0,
             huecosEstimados: 0,
-            mensajeVoz: "Diagnóstico: \(razon)",
+            mensajeVoz: razon,
             colorSemaforo: .gray
+        )
+    }
+
+    // MARK: - Helpers de imagen
+
+    /// Convierte UIImage a CVPixelBuffer (BGRA) del tamaño deseado.
+    /// Se usa para `prediction(image:)` directo, sin pasar por Vision.
+    private func pixelBuffer(from image: UIImage, size: CGSize) -> CVPixelBuffer? {
+        let attrs: [CFString: Any] = [
+            kCVPixelBufferCGImageCompatibilityKey: true,
+            kCVPixelBufferCGBitmapContextCompatibilityKey: true
+        ]
+        var pb: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            Int(size.width), Int(size.height),
+            kCVPixelFormatType_32BGRA,
+            attrs as CFDictionary, &pb
+        )
+        guard status == kCVReturnSuccess, let buffer = pb else { return nil }
+
+        CVPixelBufferLockBaseAddress(buffer, [])
+        defer { CVPixelBufferUnlockBaseAddress(buffer, []) }
+
+        guard let context = CGContext(
+            data: CVPixelBufferGetBaseAddress(buffer),
+            width: Int(size.width), height: Int(size.height),
+            bitsPerComponent: 8,
+            bytesPerRow: CVPixelBufferGetBytesPerRow(buffer),
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+
+        context.translateBy(x: 0, y: size.height)
+        context.scaleBy(x: 1, y: -1)
+        UIGraphicsPushContext(context)
+        image.draw(in: CGRect(origin: .zero, size: size))
+        UIGraphicsPopContext()
+        return buffer
+    }
+
+    // MARK: - Estrategia 1: Vision + VNCoreMLRequest
+
+    private func clasificarConVision(image: UIImage, modelo: BimboShelfClassifier) async -> ShelfResult? {
+        guard let cgImage = image.cgImage else { return nil }
+        guard let vnModel = try? VNCoreMLModel(for: modelo.model) else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            let box = ResumeBox(continuation)
+
+            let request = VNCoreMLRequest(model: vnModel) { req, error in
+                if let error = error {
+                    self.log.warning("Vision error: \(error.localizedDescription)")
+                    box.resume(nil)
+                    return
+                }
+                guard let observations = req.results as? [VNClassificationObservation],
+                      let top = observations.first else {
+                    box.resume(nil)
+                    return
+                }
+                self.log.debug("[Vision] Top: \(top.identifier) confidence=\(top.confidence)")
+                box.resume(self.construirResultado(clase: top.identifier, confidence: Double(top.confidence)))
+            }
+            request.imageCropAndScaleOption = .centerCrop
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                do {
+                    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+                    try handler.perform([request])
+                } catch {
+                    self.log.warning("handler.perform throw: \(error.localizedDescription)")
+                    box.resume(nil)
+                }
+            }
+        }
+    }
+
+    // MARK: - Estrategia 2: CoreML directo (bypassing Vision)
+
+    private func clasificarConCoreML(image: UIImage, modelo: BimboShelfClassifier) -> ShelfResult? {
+        // Create ML image classifier usa 299×299 por defecto (VisionFeaturePrint_Scene)
+        guard let buffer = pixelBuffer(from: image, size: CGSize(width: 299, height: 299)) else {
+            log.warning("No se pudo crear pixel buffer")
+            return nil
+        }
+
+        do {
+            let output = try modelo.prediction(image: buffer)
+            let clase = output.classLabel
+            let confidence = output.classLabelProbs[clase] ?? 0
+            log.debug("[CoreML directo] \(clase) confidence=\(confidence)")
+            for (k, v) in output.classLabelProbs {
+                log.debug("  \(k): \(v)")
+            }
+            return construirResultado(clase: clase, confidence: confidence)
+        } catch {
+            log.warning("CoreML prediction throw: \(error.localizedDescription)")
+            return nil
+        }
+    }
+
+    // MARK: - Construcción del resultado
+
+    private func construirResultado(clase: String, confidence: Double) -> ShelfResult {
+        let huecos = calcularHuecos(clase: clase, confidence: confidence)
+        let mensaje = mensajeParaHuecos(clase: clase, huecos: huecos)
+        let (estado, color) = mapearEstado(clase: clase)
+        return ShelfResult(
+            estado: estado,
+            confidence: confidence,
+            huecosEstimados: huecos,
+            mensajeVoz: mensaje,
+            colorSemaforo: color
         )
     }
 
     // MARK: - Caja para evitar doble-resume
 
-    private final class Box: @unchecked Sendable {
+    private final class ResumeBox: @unchecked Sendable {
         var resumed = false
-        let continuation: CheckedContinuation<ShelfResult, Never>
-        init(_ c: CheckedContinuation<ShelfResult, Never>) { continuation = c }
-        func resume(_ result: ShelfResult) {
+        let continuation: CheckedContinuation<ShelfResult?, Never>
+        init(_ c: CheckedContinuation<ShelfResult?, Never>) { continuation = c }
+        func resume(_ result: ShelfResult?) {
             guard !resumed else { return }
             resumed = true
             continuation.resume(returning: result)
         }
     }
 
-    // MARK: - Clasificación principal
+    // MARK: - Punto de entrada
 
+    /// Estrategia: probar varios computeUnits con Vision y CoreML directo.
+    /// Si todo falla, regresa diagnóstico claro al usuario.
     func classify(image: UIImage) async -> ShelfResult {
-        log.debug("classify() llamado")
+        log.debug("classify() inicio")
 
-        guard let cgImage = image.cgImage else {
-            log.error("UIImage sin cgImage")
-            return resultadoMock(razon: "Imagen sin cgImage")
-        }
+        let unitsAProbar: [MLComputeUnits] = [.all, .cpuAndGPU, .cpuOnly]
 
-        let (modeloOpt, razon) = cargarModelo()
-        guard let vnModel = modeloOpt else {
-            return resultadoMock(razon: razon)
-        }
+        for units in unitsAProbar {
+            guard let modelo = cargarModelo(units: units) else { continue }
+            log.debug("Modelo cargado con \(String(describing: units))")
 
-        return await withCheckedContinuation { continuation in
-            let box = Box(continuation)
-
-            let request = VNCoreMLRequest(model: vnModel) { req, error in
-                if let error = error {
-                    self.log.error("VNCoreMLRequest error: \(error.localizedDescription)")
-                    box.resume(self.resultadoMock(razon: "Vision: \(error.localizedDescription)"))
-                    return
-                }
-                guard let observations = req.results as? [VNClassificationObservation] else {
-                    self.log.error("Resultados no son VNClassificationObservation")
-                    box.resume(self.resultadoMock(razon: "Resultados con tipo inesperado"))
-                    return
-                }
-                guard let top = observations.first else {
-                    self.log.error("Sin observaciones")
-                    box.resume(self.resultadoMock(razon: "Sin observaciones"))
-                    return
-                }
-
-                self.log.debug("Top: \(top.identifier) confidence=\(top.confidence)")
-                for obs in observations {
-                    self.log.debug("  - \(obs.identifier): \(obs.confidence)")
-                }
-
-                let clase      = top.identifier
-                let confidence = Double(top.confidence)
-                let huecos     = self.calcularHuecos(clase: clase, confidence: confidence)
-                let mensaje    = self.mensajeParaHuecos(clase: clase, huecos: huecos)
-                let (estado, color) = self.mapearEstado(clase: clase)
-
-                box.resume(ShelfResult(
-                    estado: estado,
-                    confidence: confidence,
-                    huecosEstimados: huecos,
-                    mensajeVoz: mensaje,
-                    colorSemaforo: color
-                ))
+            // Intento 1: Vision
+            if let res = await clasificarConVision(image: image, modelo: modelo) {
+                log.debug("✓ Clasificó con Vision (\(String(describing: units)))")
+                return res
             }
-            request.imageCropAndScaleOption = .centerCrop
 
-            // CoreML síncrono fuera del cooperative thread pool de Swift Concurrency
-            DispatchQueue.global(qos: .userInitiated).async {
-                do {
-                    let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-                    try handler.perform([request])
-                    // Si perform regresó sin throw, el completion ya se llamó
-                } catch {
-                    self.log.error("handler.perform throw: \(error.localizedDescription)")
-                    box.resume(self.resultadoMock(razon: "Handler: \(error.localizedDescription)"))
-                }
+            // Intento 2: CoreML directo
+            if let res = clasificarConCoreML(image: image, modelo: modelo) {
+                log.debug("✓ Clasificó con CoreML directo (\(String(describing: units)))")
+                return res
             }
+
+            log.warning("Ambos métodos fallaron con \(String(describing: units))")
         }
+
+        return resultadoMock(razon: "El simulador iOS 26 no puede correr este modelo (espresso context falla). Pruébalo en un iPhone real.")
     }
 }
