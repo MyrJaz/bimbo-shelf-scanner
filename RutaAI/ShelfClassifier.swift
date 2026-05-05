@@ -23,29 +23,16 @@ struct ShelfResult {
 
 class ShelfClassifier {
 
-    // Carga el modelo CoreML desde el bundle.
-    // Xcode compila el .mlmodel a .mlmodelc en build time — se carga directo sin recompilar.
+    // Usa la clase Swift auto-generada por Xcode al compilar el .mlmodel.
+    // Es más fiable que buscar el archivo en Bundle manualmente.
     private func cargarModelo() -> VNCoreMLModel? {
-        // Caso normal: Xcode ya compiló el .mlmodel a .mlmodelc dentro del bundle
-        if let compiledURL = Bundle.main.url(forResource: "BimboShelfClassifier", withExtension: "mlmodelc") {
-            do {
-                let mlModel = try MLModel(contentsOf: compiledURL)
-                return try VNCoreMLModel(for: mlModel)
-            } catch {
-                return nil
-            }
+        do {
+            let config = MLModelConfiguration()
+            let model = try BimboShelfClassifier(configuration: config)
+            return try VNCoreMLModel(for: model.model)
+        } catch {
+            return nil
         }
-        // Fallback: si por alguna razón está el .mlmodel sin compilar, se compila en runtime
-        if let sourceURL = Bundle.main.url(forResource: "BimboShelfClassifier", withExtension: "mlmodel") {
-            do {
-                let compiledURL = try MLModel.compileModel(at: sourceURL)
-                let mlModel = try MLModel(contentsOf: compiledURL)
-                return try VNCoreMLModel(for: mlModel)
-            } catch {
-                return nil
-            }
-        }
-        return nil
     }
 
     // Determina cuántos huecos estimar según clase y nivel de confianza
