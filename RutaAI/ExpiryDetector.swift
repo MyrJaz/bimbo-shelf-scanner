@@ -1,5 +1,6 @@
 import UIKit
 import CoreImage
+import os.log
 
 // MARK: - Tipos de resultado
 
@@ -25,6 +26,8 @@ enum EstadoCaducidad {
 /// Verde → fresco · Azul → revisar pronto · Rojo → retirar urgente
 class ExpiryDetector {
 
+    private let log = Logger(subsystem: "com.rutaai.shelf", category: "ExpiryDetector")
+
     // Tamaño al que se reduce la imagen para análisis (200×200 = 40,000 px)
     private let tamano = 200
 
@@ -43,13 +46,17 @@ class ExpiryDetector {
     // MARK: - Punto de entrada
 
     func detect(image: UIImage) -> ExpiryResult {
+        log.debug("detect() inicio — tamaño imagen: \(image.size.width)×\(image.size.height)")
+
         // Reducir + clasificar cada píxel por color HSV
         guard let mapa = construirMapaColores(de: image) else {
+            log.warning("construirMapaColores falló, regresando vacío")
             return resultadoVacio()
         }
 
         // Contar clusters contiguos (flood-fill)
         let (verdes, azules, rojos) = contarClusters(mapa: mapa)
+        log.debug("Clusters → verdes:\(verdes) azules:\(azules) rojos:\(rojos)")
 
         // Determinar estado global de caducidad
         let estado: EstadoCaducidad

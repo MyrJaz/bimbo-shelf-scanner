@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import os.log
 
 // MARK: - ViewModel principal de escaneo
 
@@ -14,6 +15,7 @@ class ScanViewModel: ObservableObject {
 
     // Sintetizador reutilizable — se mantiene en memoria para no cortarse entre llamadas
     private let sintetizador = AVSpeechSynthesizer()
+    private let log = Logger(subsystem: "com.rutaai.shelf", category: "ScanViewModel")
 
     // MARK: - Análisis con IA (huecos + caducidad en paralelo)
 
@@ -47,19 +49,31 @@ class ScanViewModel: ObservableObject {
 
     // MARK: - Síntesis de voz
 
-    /// Reproduce caducidad (si urgente) y luego huecos.
+    /// Activa la sesión de audio para que iOS permita síntesis de voz en primer plano.
+    private func activarSesionAudio() {
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: .duckOthers)
+            try session.setActive(true)
+        } catch {
+            log.warning("AVAudioSession setup falló: \(error.localizedDescription)")
+        }
+    }
+
+    /// Reproduce caducidad (siempre) y luego huecos.
     /// AVSpeechSynthesizer encola los utterances y los reproduce en orden.
     private func reproducirVozCompleto() {
+        activarSesionAudio()
         if sintetizador.isSpeaking {
             sintetizador.stopSpeaking(at: .immediate)
         }
 
-        // 1. Caducidad primero si es urgente
-        if let cad = resultadoCaducidad, cad.requiereAtencionUrgente {
+        // 1. Caducidad siempre (urgente primero)
+        if let cad = resultadoCaducidad {
             sintetizador.speak(crearUtterance(cad.mensajeVoz))
         }
 
-        // 2. Mensaje de huecos (siempre)
+        // 2. Mensaje de huecos
         if let res = resultado {
             sintetizador.speak(crearUtterance(res.mensajeVoz))
         }
@@ -68,6 +82,7 @@ class ScanViewModel: ObservableObject {
     /// Reproduce solo el mensaje de huecos (botón en la card de huecos).
     func reproducirVoz() {
         guard let mensaje = resultado?.mensajeVoz else { return }
+        activarSesionAudio()
         if sintetizador.isSpeaking {
             sintetizador.stopSpeaking(at: .immediate)
         }
@@ -77,6 +92,7 @@ class ScanViewModel: ObservableObject {
     /// Reproduce solo el mensaje de caducidad (botón en la card de caducidad).
     func reproducirVozCaducidad() {
         guard let mensaje = resultadoCaducidad?.mensajeVoz else { return }
+        activarSesionAudio()
         if sintetizador.isSpeaking {
             sintetizador.stopSpeaking(at: .immediate)
         }
