@@ -23,11 +23,12 @@ struct ShelfResult {
 
 class ShelfClassifier {
 
-    // Usa la clase Swift auto-generada por Xcode al compilar el .mlmodel.
-    // Es más fiable que buscar el archivo en Bundle manualmente.
+    // Usa la clase auto-generada por Xcode. Fuerza CPU para funcionar en simulador
+    // (el simulador no tiene Neural Engine — "espresso context" falla con GPU/ANE).
     private func cargarModelo() -> VNCoreMLModel? {
         do {
             let config = MLModelConfiguration()
+            config.computeUnits = .cpuOnly
             let model = try BimboShelfClassifier(configuration: config)
             return try VNCoreMLModel(for: model.model)
         } catch {
@@ -103,39 +104,39 @@ class ShelfClassifier {
     // MARK: - Clasificación principal
 
     /// Analiza una imagen y regresa el estado del anaquel.
-    /// handler.perform es síncrono — no necesita withCheckedContinuation.
+    /// Task.detached evita el warning "unsafeForcedSync" al correr CoreML
+    /// fuera del cooperative thread pool de Swift Concurrency.
     func classify(image: UIImage) async -> ShelfResult {
-        guard let vnModel = cargarModelo(),
-              let cgImage = image.cgImage else {
-            return resultadoMock()
-        }
+        guard let cgImage = image.cgImage else { return resultadoMock() }
 
-        var resultado = resultadoMock()
+        return await Task.detached(priority: .userInitiated) { [self] in
+            guard let vnModel = self.cargarModelo() else { return self.resultadoMock() }
 
-        let request = VNCoreMLRequest(model: vnModel) { req, error in
-            guard error == nil,
-                  let observations = req.results as? [VNClassificationObservation],
-                  let top = observations.first else { return }
+            var resultado = self.resultadoMock()
 
-            let clase      = top.identifier
-            let confidence = Double(top.confidence)
-            let huecos     = self.calcularHuecos(clase: clase, confidence: confidence)
-            let mensaje    = self.mensajeParaHuecos(clase: clase, huecos: huecos)
-            let (estado, color) = self.mapearEstado(clase: clase)
+            let request = VNCoreMLRequest(model: vnModel) { req, _ in
+                guard let observations = req.results as? [VNClassificationObservation],
+                      let top = observations.first else { return }
 
-            resultado = ShelfResult(
-                estado: estado,
-                confidence: confidence,
-                huecosEstimados: huecos,
-                mensajeVoz: mensaje,
-                colorSemaforo: color
-            )
-        }
+                let clase      = top.identifier
+                let confidence = Double(top.confidence)
+                let huecos     = self.calcularHuecos(clase: clase, confidence: confidence)
+                let mensaje    = self.mensajeParaHuecos(clase: clase, huecos: huecos)
+                let (estado, color) = self.mapearEstado(clase: clase)
 
-        request.imageCropAndScaleOption = .centerCrop
-        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-        try? handler.perform([request])
+                resultado = ShelfResult(
+                    estado: estado,
+                    confidence: confidence,
+                    huecosEstimados: huecos,
+                    mensajeVoz: mensaje,
+                    colorSemaforo: color
+                )
+            }
 
-        return resultado
+            request.imageCropAndScaleOption = .centerCrop
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            try? handler.perform([request])
+            return resultado
+        }.value
     }
 }
