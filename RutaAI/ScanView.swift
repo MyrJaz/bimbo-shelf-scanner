@@ -5,6 +5,12 @@ import SwiftUI
 struct ScanView: View {
 
     @StateObject var viewModel = ScanViewModel()
+    @State private var mostrarAcciones = false
+    @State private var fuenteSeleccionada: UIImagePickerController.SourceType = .photoLibrary
+
+    private var camaraDisponible: Bool {
+        UIImagePickerController.isSourceTypeAvailable(.camera)
+    }
 
     var body: some View {
         NavigationStack {
@@ -46,23 +52,41 @@ struct ScanView: View {
 
                     Spacer(minLength: 32)
 
-                    // 5 · Botón principal
-                    Button {
-                        viewModel.mostrarPicker = true
-                    } label: {
-                        Label("Escanear anaquel", systemImage: "camera.fill")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity)
+                    // 5 · Botones de acción
+                    VStack(spacing: 12) {
+                        // Galería — siempre visible
+                        Button {
+                            fuenteSeleccionada = .photoLibrary
+                            viewModel.mostrarPicker = true
+                        } label: {
+                            Label("Subir foto", systemImage: "photo.on.rectangle")
+                                .font(.headline)
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.large)
+
+                        // Cámara — solo en dispositivo real
+                        if camaraDisponible {
+                            Button {
+                                fuenteSeleccionada = .camera
+                                viewModel.mostrarPicker = true
+                            } label: {
+                                Label("Tomar foto", systemImage: "camera.fill")
+                                    .font(.headline)
+                                    .frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.large)
+                        }
                     }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.large)
                     .padding(.horizontal)
                     .padding(.bottom, 24)
                 }
             }
             // 6 · Sheet con el selector de imagen
             .sheet(isPresented: $viewModel.mostrarPicker) {
-                ImagePicker(viewModel: viewModel)
+                ImagePicker(viewModel: viewModel, sourceType: fuenteSeleccionada)
                     .ignoresSafeArea()
             }
         }

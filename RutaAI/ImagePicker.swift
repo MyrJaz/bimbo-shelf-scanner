@@ -4,10 +4,11 @@ import UIKit
 // MARK: - Selector de imagen (cámara o galería)
 
 /// Envuelve UIImagePickerController para usarlo desde SwiftUI.
-/// Usa la cámara en dispositivo real; cae automáticamente a la galería en simulador.
+/// Recibe la fuente explícitamente (cámara o galería).
 struct ImagePicker: UIViewControllerRepresentable {
 
     @ObservedObject var viewModel: ScanViewModel
+    var sourceType: UIImagePickerController.SourceType = .photoLibrary
 
     // MARK: Coordinator
 
@@ -50,10 +51,7 @@ struct ImagePicker: UIViewControllerRepresentable {
         picker.delegate = context.coordinator
         picker.allowsEditing = false
 
-        // Cámara en dispositivo real; galería como fallback en simulador
-        picker.sourceType = UIImagePickerController.isSourceTypeAvailable(.camera)
-            ? .camera
-            : .photoLibrary
+        picker.sourceType = sourceType
 
         return picker
     }
