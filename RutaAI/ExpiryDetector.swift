@@ -212,8 +212,9 @@ class ExpiryDetector {
                 }
 
                 // Solo contamos clusters dentro del rango de tamaño esperado para un sticker
+                let colorStr = "\(color.rawValue)"
                 if tamanoCluster >= minPixelesCluster && tamanoCluster <= maxPixelesCluster {
-                    log.debug("Cluster \(color) → \(tamanoCluster) px ✓")
+                    log.debug("Cluster c=\(colorStr) \(tamanoCluster)px ✓")
                     switch color {
                     case .verde:   verdes += 1
                     case .azul:    azules += 1
@@ -221,7 +222,7 @@ class ExpiryDetector {
                     case .ninguno: break
                     }
                 } else if tamanoCluster > maxPixelesCluster {
-                    log.debug("Cluster \(color) → \(tamanoCluster) px descartado (empaque grande)")
+                    log.debug("Cluster c=\(colorStr) \(tamanoCluster)px descartado-grande")
                 }
             }
         }
