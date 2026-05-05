@@ -116,49 +116,39 @@ class ShelfClassifier {
     // MARK: - Clasificación principal
 
     /// Analiza una imagen y regresa el estado del anaquel.
-    /// Si el modelo no carga, regresa un resultado mock para no crashear.
+    /// handler.perform es síncrono — no necesita withCheckedContinuation.
     func classify(image: UIImage) async -> ShelfResult {
-        guard let vnModel = cargarModelo() else {
+        guard let vnModel = cargarModelo(),
+              let cgImage = image.cgImage else {
             return resultadoMock()
         }
 
-        guard let cgImage = image.cgImage else {
-            return resultadoMock()
+        var resultado = resultadoMock()
+
+        let request = VNCoreMLRequest(model: vnModel) { req, error in
+            guard error == nil,
+                  let observations = req.results as? [VNClassificationObservation],
+                  let top = observations.first else { return }
+
+            let clase      = top.identifier
+            let confidence = Double(top.confidence)
+            let huecos     = self.calcularHuecos(clase: clase, confidence: confidence)
+            let mensaje    = self.mensajeParaHuecos(clase: clase, huecos: huecos)
+            let (estado, color) = self.mapearEstado(clase: clase)
+
+            resultado = ShelfResult(
+                estado: estado,
+                confidence: confidence,
+                huecosEstimados: huecos,
+                mensajeVoz: mensaje,
+                colorSemaforo: color
+            )
         }
 
-        return await withCheckedContinuation { continuation in
-            let request = VNCoreMLRequest(model: vnModel) { request, error in
-                guard error == nil,
-                      let observations = request.results as? [VNClassificationObservation],
-                      let top = observations.first else {
-                    continuation.resume(returning: self.resultadoMock())
-                    return
-                }
+        request.imageCropAndScaleOption = .centerCrop
+        let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+        try? handler.perform([request])
 
-                let clase      = top.identifier
-                let confidence = Double(top.confidence)
-                let huecos     = self.calcularHuecos(clase: clase, confidence: confidence)
-                let mensaje    = self.mensajeParaHuecos(clase: clase, huecos: huecos)
-                let (estado, color) = self.mapearEstado(clase: clase)
-
-                continuation.resume(returning: ShelfResult(
-                    estado: estado,
-                    confidence: confidence,
-                    huecosEstimados: huecos,
-                    mensajeVoz: mensaje,
-                    colorSemaforo: color
-                ))
-            }
-
-            // Recorte centrado — mejor para clasificación de imágenes de anaquel
-            request.imageCropAndScaleOption = .centerCrop
-
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
-            do {
-                try handler.perform([request])
-            } catch {
-                continuation.resume(returning: self.resultadoMock())
-            }
-        }
+        return resultado
     }
 }
