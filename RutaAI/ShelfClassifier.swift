@@ -186,10 +186,10 @@ class ShelfClassifier {
 
         do {
             let output = try modelo.prediction(image: buffer)
-            let clase = output.classLabel
-            let confidence = output.classLabelProbs[clase] ?? 0
+            let clase = output.target
+            let confidence = output.targetProbability[clase] ?? 0
             log.debug("[CoreML directo] \(clase) confidence=\(confidence)")
-            for (k, v) in output.classLabelProbs {
+            for (k, v) in output.targetProbability {
                 log.debug("  \(k): \(v)")
             }
             return construirResultado(clase: clase, confidence: confidence)
