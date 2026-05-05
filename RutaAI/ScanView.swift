@@ -42,10 +42,18 @@ struct ScanView: View {
                             .padding(.vertical, 20)
                     }
 
-                    // 4 · Card de resultado
+                    // 4 · Card de huecos
                     if let res = viewModel.resultado, !viewModel.isAnalyzing {
                         ResultadoCard(resultado: res) {
                             viewModel.reproducirVoz()
+                        }
+                        .padding(.horizontal)
+                    }
+
+                    // 4b · Card de caducidad
+                    if let cad = viewModel.resultadoCaducidad, !viewModel.isAnalyzing {
+                        CaducidadCard(resultado: cad) {
+                            viewModel.reproducirVozCaducidad()
                         }
                         .padding(.horizontal)
                     }
@@ -166,6 +174,112 @@ private struct ResultadoCard: View {
                 .fill(.background)
                 .shadow(color: .black.opacity(0.08), radius: 8, x: 0, y: 4)
         )
+    }
+}
+
+// MARK: - Card de caducidad
+
+private struct CaducidadCard: View {
+
+    let resultado: ExpiryResult
+    let onReproducir: () -> Void
+
+    // Ícono según estado de caducidad
+    private var icono: String {
+        switch resultado.estadoCaducidad {
+        case .todo_fresco:     return "checkmark.seal"
+        case .revisar_pronto:  return "clock"
+        case .retirar_urgente: return "clock.badge.exclamationmark"
+        }
+    }
+
+    // Color de fondo suave según estado
+    private var fondoCard: Color {
+        switch resultado.estadoCaducidad {
+        case .todo_fresco:     return Color.green.opacity(0.12)
+        case .revisar_pronto:  return Color.yellow.opacity(0.12)
+        case .retirar_urgente: return Color.red.opacity(0.12)
+        }
+    }
+
+    // Color del ícono y texto principal
+    private var colorAccento: Color {
+        switch resultado.estadoCaducidad {
+        case .todo_fresco:     return .green
+        case .revisar_pronto:  return .orange
+        case .retirar_urgente: return .red
+        }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+
+            // Cabecera con ícono y título
+            HStack(spacing: 12) {
+                Image(systemName: icono)
+                    .font(.title2)
+                    .foregroundStyle(colorAccento)
+                Text("Caducidad")
+                    .font(.system(size: 20, weight: .bold))
+                Spacer()
+            }
+
+            // Tres filas: verde, azul, rojo con su contador
+            VStack(spacing: 10) {
+                FilaContador(color: .green, etiqueta: "frescas",   cantidad: resultado.etiquetasVerdes)
+                FilaContador(color: .blue,  etiqueta: "por revisar", cantidad: resultado.etiquetasAzules)
+                FilaContador(color: .red,   etiqueta: "por retirar", cantidad: resultado.etiquetasRojas)
+            }
+
+            // Banner de urgencia solo si hay rojas
+            if resultado.requiereAtencionUrgente {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                    Text("Retira estos productos hoy")
+                        .font(.callout.bold())
+                }
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .background(Color.red)
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+            }
+
+            // Botón para reproducir solo el mensaje de caducidad
+            Button {
+                onReproducir()
+            } label: {
+                Label("Reproducir voz", systemImage: "speaker.wave.2.fill")
+                    .font(.callout)
+            }
+            .buttonStyle(.bordered)
+            .tint(colorAccento)
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 16)
+                .fill(fondoCard)
+        )
+    }
+}
+
+// MARK: - Fila individual con círculo de color y contador
+
+private struct FilaContador: View {
+    let color: Color
+    let etiqueta: String
+    let cantidad: Int
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Circle()
+                .fill(color)
+                .frame(width: 18, height: 18)
+            Text("\(cantidad) \(etiqueta)")
+                .font(.body)
+            Spacer()
+        }
     }
 }
 
