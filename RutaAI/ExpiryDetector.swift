@@ -28,12 +28,14 @@ class ExpiryDetector {
 
     private let log = Logger(subsystem: "com.rutaai.shelf", category: "ExpiryDetector")
 
-    // Tamaño al que se reduce la imagen para análisis (200×200 = 40,000 px)
-    private let tamano = 200
+    // Tamaño al que se reduce la imagen para análisis (300×300)
+    // Más resolución → puntos pequeños tienen más píxeles y se detectan mejor
+    private let tamano = 300
 
-    // Mínimo de píxeles contiguos para considerar un cluster válido
-    // (evita falsos positivos de colores en empaques)
-    private let minPixelesCluster = 80
+    // Mínimo de píxeles contiguos para considerar un cluster válido.
+    // A 300×300, un punto de ~12 px de diámetro ≈ 113 px.
+    // Threshold 100 filtra ruido de empaque pero acepta puntos reales.
+    private let minPixelesCluster = 100
 
     // Etiquetas internas para clasificar cada píxel
     private enum ColorEtiqueta: UInt8 {
@@ -146,16 +148,18 @@ class ExpiryDetector {
         }
         if h < 0 { h += 360 }
 
-        // Verde:  H 80–160,  S > 0.35, V > 0.25
-        if h >= 80 && h <= 160 && s > 0.35 && v > 0.25 {
+        // Verde:  H 75–165,  S > 0.30, V > 0.25
+        // Rango un poco más amplio para capturar distintos tonos de verde lima
+        if h >= 75 && h <= 165 && s > 0.30 && v > 0.25 {
             return .verde
         }
-        // Azul:   H 190–260, S > 0.35, V > 0.25
-        if h >= 190 && h <= 260 && s > 0.35 && v > 0.25 {
+        // Azul:   H 185–265, S > 0.35, V > 0.25
+        if h >= 185 && h <= 265 && s > 0.35 && v > 0.25 {
             return .azul
         }
-        // Rojo:   H 0–15 o H 345–360, S > 0.40, V > 0.25
-        if ((h >= 0 && h <= 15) || (h >= 345 && h <= 360)) && s > 0.40 && v > 0.25 {
+        // Rosa/Magenta: H 295–345, S > 0.50, V > 0.30
+        // Cubre hot-pink y magenta; excluye rojo-anaranjado de empaques (H 0–20)
+        if h >= 295 && h <= 345 && s > 0.50 && v > 0.30 {
             return .rojo
         }
         return .ninguno
